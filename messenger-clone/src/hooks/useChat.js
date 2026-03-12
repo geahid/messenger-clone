@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   collection, query, where, orderBy, onSnapshot,
   addDoc, serverTimestamp, doc, updateDoc, getDocs,
-  setDoc, getDoc, limit,
+  setDoc, getDoc, limit, arrayUnion, arrayRemove,
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../firebase';
@@ -18,17 +18,14 @@ export function useChat() {
   const [users, setUsers] = useState([]);
   const [loadingMessages, setLoadingMessages] = useState(false);
 
-  // Load all users for sidebar
+  // Load all users
   useEffect(() => {
     if (!currentUser) return;
     const q = query(collection(db, 'users'), where('uid', '!=', currentUser.uid));
-    const unsub = onSnapshot(q, snap => {
-      setUsers(snap.docs.map(d => d.data()));
-    });
-    return unsub;
+    return onSnapshot(q, snap => setUsers(snap.docs.map(d => d.data())));
   }, [currentUser]);
 
-  // Load conversations
+  // Load conversations ordered by most recent
   useEffect(() => {
     if (!currentUser) return;
     const q = query(
@@ -36,13 +33,10 @@ export function useChat() {
       where('participants', 'array-contains', currentUser.uid),
       orderBy('updatedAt', 'desc')
     );
-    const unsub = onSnapshot(q, snap => {
-      setConversations(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    });
-    return unsub;
+    return onSnapshot(q, snap => setConversations(snap.docs.map(d => ({ id: d.id, ...d.data() }))));
   }, [currentUser]);
 
-  // Load messages for active conversation
+  // Load messages
   useEffect(() => {
     if (!activeConversation) { setMessages([]); return; }
     setLoadingMessages(true);
@@ -57,14 +51,11 @@ export function useChat() {
       markAsRead(activeConversation.id);
     });
     return unsub;
-  }, [activeConversation]);
+  }, [activeConversation?.id]);
 
   const markAsRead = useCallback(async (convId) => {
     if (!currentUser) return;
-    const convRef = doc(db, 'conversations', convId);
-    await updateDoc(convRef, {
-      [`unread.${currentUser.uid}`]: 0,
-    });
+    await updateDoc(doc(db, 'conversations', convId), { [`unread.${currentUser.uid}`]: 0 });
   }, [currentUser]);
 
   const getOrCreateConversation = useCallback(async (otherUser) => {
@@ -72,9 +63,9 @@ export function useChat() {
     const participants = [currentUser.uid, otherUser.uid].sort();
     const convId = participants.join('_');
     const convRef = doc(db, 'conversations', convId);
-    const convSnap = await getDoc(convRef);
+    const snap = await getDoc(convRef);
 
-    if (!convSnap.exists()) {
+    if (!snap.exists()) {
       await setDoc(convRef, {
         id: convId,
         participants,
@@ -82,10 +73,12 @@ export function useChat() {
           [currentUser.uid]: {
             displayName: currentUser.displayName,
             photoURL: currentUser.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${currentUser.displayName}`,
+            nickname: currentUser.displayName,
           },
           [otherUser.uid]: {
             displayName: otherUser.displayName,
             photoURL: otherUser.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${otherUser.displayName}`,
+            nickname: otherUser.displayName,
           },
         },
         lastMessage: '',
@@ -95,13 +88,15 @@ export function useChat() {
         typing: {},
       });
     }
-    const snap = await getDoc(convRef);
-    return { id: convId, ...snap.data() };
+    const s = await getDoc(convRef);
+    return { id: convId, ...s.data() };
   }, [currentUser]);
 
-  const sendMessage = useCallback(async (text, imageFile = null) => {
+  const sendMessage = useCallback(async (text, imageFile = null, voiceBlob = null) => {
     if (!activeConversation || !currentUser) return;
     let imageUrl = null;
+    let voiceUrl = null;
+    let voiceDuration = null;
 
     if (imageFile) {
       const storageRef = ref(storage, `chat-images/${uuidv4()}`);
@@ -109,9 +104,18 @@ export function useChat() {
       imageUrl = await getDownloadURL(storageRef);
     }
 
+    if (voiceBlob) {
+      const storageRef = ref(storage, `voice-messages/${uuidv4()}.webm`);
+      await uploadBytes(storageRef, voiceBlob);
+      voiceUrl = await getDownloadURL(storageRef);
+      voiceDuration = voiceBlob.duration || 0;
+    }
+
     const msgData = {
       text: text || '',
       imageUrl,
+      voiceUrl,
+      voiceDuration,
       senderId: currentUser.uid,
       senderName: currentUser.displayName,
       senderPhoto: currentUser.photoURL || `https://api.dicebear.com/7.x/avataaars/svg?seed=${currentUser.displayName}`,
@@ -120,10 +124,9 @@ export function useChat() {
     };
 
     await addDoc(collection(db, 'conversations', activeConversation.id, 'messages'), msgData);
-
     const otherUid = activeConversation.participants.find(uid => uid !== currentUser.uid);
     await updateDoc(doc(db, 'conversations', activeConversation.id), {
-      lastMessage: text || '📷 Image',
+      lastMessage: voiceUrl ? '🎙 Voice message' : imageUrl ? '📷 Image' : text,
       lastMessageTime: serverTimestamp(),
       updatedAt: serverTimestamp(),
       [`unread.${otherUid}`]: (activeConversation.unread?.[otherUid] || 0) + 1,
@@ -143,9 +146,35 @@ export function useChat() {
     return conv;
   }, [getOrCreateConversation]);
 
+  // Friend system
+  const sendFriendRequest = useCallback(async (targetUid) => {
+    if (!currentUser) return;
+    await updateDoc(doc(db, 'users', targetUid), { friendRequests: arrayUnion(currentUser.uid) });
+    await updateDoc(doc(db, 'users', currentUser.uid), { sentRequests: arrayUnion(targetUid) });
+  }, [currentUser]);
+
+  const acceptFriendRequest = useCallback(async (requesterUid) => {
+    if (!currentUser) return;
+    await updateDoc(doc(db, 'users', currentUser.uid), {
+      friends: arrayUnion(requesterUid),
+      friendRequests: arrayRemove(requesterUid),
+    });
+    await updateDoc(doc(db, 'users', requesterUid), {
+      friends: arrayUnion(currentUser.uid),
+      sentRequests: arrayRemove(currentUser.uid),
+    });
+  }, [currentUser]);
+
+  const declineFriendRequest = useCallback(async (requesterUid) => {
+    if (!currentUser) return;
+    await updateDoc(doc(db, 'users', currentUser.uid), { friendRequests: arrayRemove(requesterUid) });
+    await updateDoc(doc(db, 'users', requesterUid), { sentRequests: arrayRemove(currentUser.uid) });
+  }, [currentUser]);
+
   return {
     conversations, activeConversation, setActiveConversation,
     messages, users, loadingMessages,
     sendMessage, openConversation, setTyping,
+    sendFriendRequest, acceptFriendRequest, declineFriendRequest,
   };
 }

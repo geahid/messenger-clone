@@ -3,12 +3,15 @@ import { useState } from 'react';
 import Sidebar from '../components/Sidebar';
 import ChatWindow from '../components/ChatWindow';
 import { useChat } from '../hooks/useChat';
+import { useAuth } from '../context/AuthContext';
 
 export default function ChatPage() {
+  const { userProfile } = useAuth();
   const {
     conversations, activeConversation, setActiveConversation,
     messages, users, loadingMessages,
     sendMessage, openConversation, setTyping,
+    sendFriendRequest, acceptFriendRequest, declineFriendRequest,
   } = useChat();
   const [showSidebar, setShowSidebar] = useState(true);
 
@@ -23,15 +26,20 @@ export default function ChatPage() {
   };
 
   return (
-    <div className="flex h-screen bg-white dark:bg-slate-950 overflow-hidden">
-      {/* Sidebar – always visible on md+, conditionally on mobile */}
-      <div className={`${showSidebar ? 'flex' : 'hidden'} md:flex w-full md:w-80 lg:w-96 flex-shrink-0 h-full`}>
+    <div className="flex h-screen overflow-hidden" style={{ background: '#050810' }}>
+      {/* Sidebar */}
+      <div className={`${showSidebar ? 'flex' : 'hidden'} md:flex flex-shrink-0 h-full`}
+        style={{ width: showSidebar ? '100%' : 'auto', maxWidth: 420 }}>
         <Sidebar
           conversations={conversations}
           users={users}
           activeConversation={activeConversation}
           onSelectConversation={handleSelectConversation}
           onSelectUser={handleSelectUser}
+          userProfile={userProfile}
+          acceptFriendRequest={acceptFriendRequest}
+          declineFriendRequest={declineFriendRequest}
+          sendFriendRequest={sendFriendRequest}
         />
       </div>
 
@@ -45,6 +53,8 @@ export default function ChatPage() {
           onTyping={setTyping}
           users={users}
           onBack={() => setShowSidebar(true)}
+          sendFriendRequest={sendFriendRequest}
+          userProfile={userProfile}
         />
       </div>
     </div>
